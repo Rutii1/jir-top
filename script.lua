@@ -5,22 +5,28 @@ local RunService = game:GetService("RunService")
 local Lighting = game:GetService("Lighting")
 local Workspace = game:GetService("Workspace")
 local GuiService = game:GetService("GuiService")
+local HttpService = game:GetService("HttpService")
+local Stats = game:GetService("Stats")
 
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 local Camera = Workspace.CurrentCamera
 
+local function DefaultShowIn()
+	return { Survivors = true, Killer = true, Spectators = true }
+end
+
 local TeamConfig = {
-	Survivors = { Color = Color3.fromRGB(80, 80, 80), Enabled = false, Order = 1 },
-	Killer = { Color = Color3.fromRGB(80, 80, 80), Enabled = false, Order = 2 },
-	Spectator = { Color = Color3.fromRGB(80, 80, 80), Enabled = false, Order = 3 }
+	Survivors = { Color = Color3.fromRGB(80, 80, 80), Enabled = false, Order = 1, ShowIn = DefaultShowIn() },
+	Killer = { Color = Color3.fromRGB(80, 80, 80), Enabled = false, Order = 2, ShowIn = DefaultShowIn() },
+	Spectator = { Color = Color3.fromRGB(80, 80, 80), Enabled = false, Order = 3, ShowIn = DefaultShowIn() }
 }
 
 local KillerBeamConfig = { Enabled = false, Color = Color3.fromRGB(80, 80, 80), Length = 150 }
 
 local ObjectESPConfig = {
-    Generator = { Enabled = false, Color = Color3.fromRGB(255, 190, 70) },
-    Pallet = { Enabled = false, Color = Color3.fromRGB(80, 190, 255) }
+	Generator = { Enabled = false, Color = Color3.fromRGB(255, 190, 70), ShowIn = DefaultShowIn() },
+	Pallet = { Enabled = false, Color = Color3.fromRGB(80, 190, 255), ShowIn = DefaultShowIn() }
 }
 
 local VisualsConfig = {
@@ -77,8 +83,21 @@ local UIConfig = {
 	Text = Color3.fromRGB(238, 238, 238)
 }
 
+local StatsConfig = {
+	Enabled = false,
+	FPS = true,
+	Ping = true,
+	TPS = true,
+	ToggleKey = Enum.KeyCode.F7,
+	Background = Color3.fromRGB(10, 10, 10),
+	Border = Color3.fromRGB(36, 36, 36),
+	Label = Color3.fromRGB(125, 125, 125),
+	Value = Color3.fromRGB(238, 238, 238)
+}
+
 local RecentColors = {}
 local RecentColorButtons = {}
+local SyncUIControls = {}
 local waitingForMenuKey = false
 local waitingForCursorKey = false
 local waitingForStatsKey = false
@@ -91,8 +110,6 @@ local origClockTime = Lighting.ClockTime
 local origGlobalShadows = Lighting.GlobalShadows
 local origFogEnd = Lighting.FogEnd
 
--- Fullbright: значения принудительно держатся, даже если игра меняет
--- время суток / яркость (смена дня и ночи больше не сбрасывает эффект).
 local FULLBRIGHT_BRIGHTNESS = 2
 local FULLBRIGHT_CLOCKTIME = 14
 
@@ -106,8 +123,6 @@ local function EnforceFullbright()
 	end
 end
 
--- Запоминаем актуальные значения игры (для восстановления при выключении),
--- игнорируя наши собственные изменения.
 Lighting:GetPropertyChangedSignal("ClockTime"):Connect(function()
 	if VisualsConfig.Fullbright
 		and math.abs(Lighting.ClockTime - FULLBRIGHT_CLOCKTIME) <= 0.001 then
@@ -126,8 +141,6 @@ Lighting:GetPropertyChangedSignal("Brightness"):Connect(function()
 	EnforceFullbright()
 end)
 
--- No Fog: туман и Atmosphere тоже принудительно отключены, пока опция включена
--- (если игра создаёт новый Atmosphere или меняет FogEnd, он снова убирается).
 local NOFOG_END = 1000000
 local RemovedAtmospheres = {}
 
@@ -162,16 +175,12 @@ Lighting:GetPropertyChangedSignal("FogEnd"):Connect(function()
 	EnforceNoFog()
 end)
 
--- Страховка на случай, если игра меняет освещение способом без сигнала.
 RunService.Heartbeat:Connect(function()
 	EnforceFullbright()
 	EnforceNoFog()
 end)
 
--- Disable Blur: отключает все эффекты размытия (BlurEffect и DepthOfFieldEffect)
--- в Lighting и в камере. Если игра включает или создаёт их снова - они
--- отключаются заново.
-local BlurOriginal = setmetatable({}, { __mode = "k" })  -- effect -> исходный Enabled
+local BlurOriginal = setmetatable({}, { __mode = "k" })
 local BlurOurWrites = setmetatable({}, { __mode = "k" })
 local BlurWatched = setmetatable({}, { __mode = "k" })
 
@@ -194,11 +203,11 @@ local function HookBlurEffect(effect)
 	BlurOriginal[effect] = effect.Enabled
 	effect:GetPropertyChangedSignal("Enabled"):Connect(function()
 		if BlurOurWrites[effect] and not effect.Enabled then
-			BlurOurWrites[effect] = nil -- это наше собственное выключение
+			BlurOurWrites[effect] = nil
 			return
 		end
 		BlurOurWrites[effect] = nil
-		BlurOriginal[effect] = effect.Enabled -- изменила игра
+		BlurOriginal[effect] = effect.Enabled
 		if VisualsConfig.NoBlur then SuppressBlur(effect) end
 	end)
 	if VisualsConfig.NoBlur then SuppressBlur(effect) end
@@ -224,7 +233,6 @@ local function WatchBlurContainer(container)
 	ScanBlurIn(container)
 end
 
--- pcall: ошибка в этих дополнительных функциях не должна ломать запуск меню.
 pcall(WatchBlurContainer, Lighting)
 pcall(WatchBlurContainer, Workspace.CurrentCamera)
 Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
@@ -247,7 +255,6 @@ local function ApplyNoBlur(on)
 	end
 end
 
--- Camera zoom: фиксированная дистанция камеры (минимум = максимум = значение).
 local origMaxZoom, origMinZoom
 
 local function ApplyZoomDistance(distance)
@@ -273,21 +280,21 @@ end
 local function SetZoomEnabled(enabled)
 	VisualsConfig.Zoom = enabled
 	if enabled then
-		origMaxZoom = LocalPlayer.CameraMaxZoomDistance
-		origMinZoom = LocalPlayer.CameraMinZoomDistance
+		if not origMaxZoom then
+			origMaxZoom = LocalPlayer.CameraMaxZoomDistance
+			origMinZoom = LocalPlayer.CameraMinZoomDistance
+		end
 		EnforceZoom()
 	elseif origMaxZoom and origMinZoom then
 		LocalPlayer.CameraMaxZoomDistance = origMaxZoom
 		LocalPlayer.CameraMinZoomDistance = origMinZoom
+		origMaxZoom, origMinZoom = nil, nil
 	end
 end
 
 RunService.RenderStepped:Connect(EnforceZoom)
 
--- При каждой смене команды Fullbright и No Fog (если включены) выключаются
--- и включаются заново, а размытие перепроверяется.
 local function ReapplyWorldEffects()
-	-- выключить
 	if VisualsConfig.Fullbright then
 		Lighting.Brightness = origBrightness
 		Lighting.ClockTime = origClockTime
@@ -295,7 +302,6 @@ local function ReapplyWorldEffects()
 	if VisualsConfig.NoFog then
 		RestoreFog()
 	end
-	-- включить заново
 	if VisualsConfig.Fullbright then EnforceFullbright() end
 	if VisualsConfig.NoFog then EnforceNoFog() end
 	if VisualsConfig.NoBlur then ApplyNoBlur(true) end
@@ -386,11 +392,33 @@ local function IsPointerMove(input)
 		or input.UserInputType == Enum.UserInputType.Touch
 end
 
+-- Координаты InputObject совпадают с AbsolutePosition элементов GUI без смещения на GuiInset.
 local function PointerPosition(input)
-	if input.UserInputType == Enum.UserInputType.Touch then
-		return Vector2.new(input.Position.X, input.Position.Y) + GuiService:GetGuiInset()
+	return Vector2.new(input.Position.X, input.Position.Y)
+end
+
+local function GetLocalTeamKey()
+	local teamName = LocalPlayer.Team and LocalPlayer.Team.Name
+	if teamName == "Survivors" then
+		return "Survivors"
+	elseif teamName == "Killer" then
+		return "Killer"
+	elseif teamName == "Spectators" or teamName == "Spectator" then
+		return "Spectators"
 	end
-	return UserInputService:GetMouseLocation()
+	return nil
+end
+
+local function IsLocalPlayerKiller()
+	local teamName = LocalPlayer.Team and LocalPlayer.Team.Name
+	return teamName == "Killer"
+end
+
+local function IsESPVisibleForLocalTeam(showIn)
+	if not showIn then return true end
+	local key = GetLocalTeamKey()
+	if not key then return false end
+	return showIn[key] == true
 end
 
 local ScreenGui = New("ScreenGui", {
@@ -441,10 +469,10 @@ New("TextLabel", {
 	Position = UDim2.fromOffset(34, 0),
 	Size = UDim2.new(1, -90, 1, 0),
 	BackgroundTransparency = 1,
-	Text = "CONTROL PANEL",
+	Text = "жирные визуалы",
 	TextColor3 = Theme.White,
 	Font = Enum.Font.GothamBold,
-	TextSize = 13,
+	TextSize = 14,
 	TextXAlignment = Enum.TextXAlignment.Left
 })
 
@@ -494,24 +522,7 @@ end)
 
 -- ============================================================
 -- Окно статистики (FPS / Ping / TPS)
--- Отдельное окно: не закрывается вместе с меню, всегда видно, пока включено.
--- Перетаскивается мышью (когда курсор свободен, например при открытом меню).
 -- ============================================================
-local Stats = game:GetService("Stats")
-
-local StatsConfig = {
-	Enabled = false,
-	FPS = true,
-	Ping = true,
-	TPS = true,
-	ToggleKey = Enum.KeyCode.F7,
-	-- Собственные цвета окна (не зависят от темы меню)
-	Background = Color3.fromRGB(10, 10, 10),
-	Border = Color3.fromRGB(36, 36, 36),
-	Label = Color3.fromRGB(125, 125, 125),
-	Value = Color3.fromRGB(238, 238, 238)
-}
-
 local StatsStroke = Stroke(StatsConfig.Border, 1)
 
 local StatsFrame = New("CanvasGroup", {
@@ -602,8 +613,6 @@ local function RefreshStatsLayout()
 	end
 end
 
--- Сюда позже записывается функция, которая синхронизирует переключатель в UI
--- (нужна, когда окно включается/выключается клавишей).
 local setStatsToggleState
 
 local function SetStatsEnabled(enabled)
@@ -623,7 +632,6 @@ local function ApplyStatsColors()
 	end
 end
 
--- Пинг в мс (туда-обратно). Основной источник - Stats, запасной - GetNetworkPing.
 local function GetPingMs()
 	local ok, value = pcall(function()
 		return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
@@ -636,7 +644,6 @@ local function GetPingMs()
 	return (ok2 and value2) or 0
 end
 
--- TPS: реальная частота физического шага (Workspace:GetRealPhysicsFPS()).
 local function GetTPS()
 	local ok, value = pcall(function()
 		return Workspace:GetRealPhysicsFPS()
@@ -667,7 +674,6 @@ RunService.RenderStepped:Connect(function(dt)
 	statsTime, statsFrames = 0, 0
 end)
 
--- Перетаскивание окна статистики
 local draggingStats = false
 local statsDragStart, statsStartPos
 
@@ -799,8 +805,6 @@ AddTab("UI", 4, UIPage)
 
 local Sections = {}
 
--- Сворачиваемый раздел: минималистичная стрелка-шеврон справа.
--- Свёрнут: стрелка смотрит вниз. Развёрнут: плавно поворачивается на 180°.
 local function CreateSectionLabel(page, order, text)
 	local header = New("TextButton", {
 		Parent = page,
@@ -827,7 +831,6 @@ local function CreateSectionLabel(page, order, text)
 		BackgroundTransparency = 1
 	})
 
-	-- Стрелка "v" из двух скруглённых палочек.
 	local bars = {}
 	for _, spec in ipairs({ { -2.5, 45 }, { 2.5, -45 } }) do
 		table.insert(bars, New("Frame", {
@@ -982,6 +985,94 @@ local function CreateToggle(parent, position, initial, onChange)
 	return switch, setState
 end
 
+local function CreateCheckboxRow(parent, position, showInTable, onUpdate)
+	local row = New("Frame", {
+		Parent = parent,
+		Position = position,
+		Size = UDim2.new(1, -28, 0, 22),
+		BackgroundTransparency = 1
+	})
+
+	local teams = {
+		{ Key = "Survivors", Label = "Survivors", Width = 92 },
+		{ Key = "Killer", Label = "Killer", Width = 72 },
+		{ Key = "Spectators", Label = "Spectators", Width = 98 }
+	}
+
+	local setters = {}
+	local offsetX = 0
+
+	for _, info in ipairs(teams) do
+		local item = New("TextButton", {
+			Parent = row,
+			Position = UDim2.fromOffset(offsetX, 0),
+			Size = UDim2.fromOffset(info.Width, 22),
+			BackgroundTransparency = 1,
+			Text = "",
+			AutoButtonColor = false
+		})
+		offsetX += info.Width + 8
+
+		local boxStroke = Stroke(Theme.Muted, 1)
+		local box = New("Frame", {
+			Parent = item,
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.new(0, 0, 0.5, 0),
+			Size = UDim2.fromOffset(15, 15),
+			BackgroundColor3 = Theme.Background,
+			BorderSizePixel = 0
+		}, { Corner(4), boxStroke })
+
+		local check = New("TextLabel", {
+			Parent = box,
+			Size = UDim2.fromScale(1, 1),
+			BackgroundTransparency = 1,
+			Text = "✓",
+			TextColor3 = Theme.Black,
+			Font = Enum.Font.GothamBold,
+			TextSize = 11,
+			Visible = false
+		})
+
+		local lbl = New("TextLabel", {
+			Parent = item,
+			Position = UDim2.fromOffset(21, 0),
+			Size = UDim2.new(1, -21, 1, 0),
+			BackgroundTransparency = 1,
+			Text = info.Label,
+			TextColor3 = Theme.SubText,
+			Font = Enum.Font.GothamMedium,
+			TextSize = 11,
+			TextXAlignment = Enum.TextXAlignment.Left
+		})
+
+		local function render(animate)
+			local checked = showInTable[info.Key] == true
+			check.Visible = checked
+			Apply(box, { BackgroundColor3 = checked and Theme.White or Theme.Background }, animate, 0.14)
+			Apply(boxStroke, { Color = checked and Theme.White or Theme.Muted }, animate, 0.14)
+			Apply(lbl, { TextColor3 = checked and Theme.Text or Theme.SubText }, animate, 0.14)
+		end
+
+		render(false)
+		setters[info.Key] = function()
+			render(false)
+		end
+
+		item.MouseButton1Click:Connect(function()
+			showInTable[info.Key] = not (showInTable[info.Key] == true)
+			render(true)
+			if onUpdate then onUpdate() end
+		end)
+	end
+
+	return function()
+		for _, fn in pairs(setters) do
+			fn()
+		end
+	end
+end
+
 local function CreateSlider(parent, position, size, minValue, maxValue, initial, valueLabel, onChange, options)
 	options = options or {}
 	local trackHeight = options.TrackHeight or 4
@@ -1060,6 +1151,7 @@ local function CreateSlider(parent, position, size, minValue, maxValue, initial,
 		if dragging and IsPointerStart(input) then
 			dragging = false
 			Tween(handle, { Size = UDim2.fromOffset(12, 12) }, 0.1)
+			if options.OnRelease then options.OnRelease() end
 		end
 	end)
 
@@ -1109,7 +1201,7 @@ local PickerSheet = New("CanvasGroup", {
 local PickerTitle = New("TextLabel", {
 	Parent = PickerSheet,
 	Position = UDim2.fromOffset(24, 16),
-	Size = UDim2.new(1, -48, 0, 16),
+	Size = UDim2.new(1, -64, 0, 18),
 	BackgroundTransparency = 1,
 	Text = "COLOR",
 	TextColor3 = Theme.SubText,
@@ -1118,25 +1210,83 @@ local PickerTitle = New("TextLabel", {
 	TextXAlignment = Enum.TextXAlignment.Left
 })
 
+-- Крест закрытия с визуалами и плавными анимациями
+local CloseBtnStroke = Stroke(Theme.Stroke, 1)
 local PickerCloseButton = New("TextButton", {
 	Parent = PickerSheet,
 	AnchorPoint = Vector2.new(1, 0),
-	Position = UDim2.new(1, -18, 0, 12),
-	Size = UDim2.fromOffset(26, 24),
+	Position = UDim2.new(1, -18, 0, 11),
+	Size = UDim2.fromOffset(28, 28),
 	BackgroundColor3 = Theme.Card,
-	Text = "X",
-	TextColor3 = Theme.Text,
-	Font = Enum.Font.GothamBold,
-	TextSize = 12,
+	Text = "",
 	AutoButtonColor = false,
 	BorderSizePixel = 0,
 	ZIndex = 12
-}, { Corner(6), Stroke(Theme.Stroke, 1) })
+}, { Corner(8), CloseBtnStroke })
+
+local CloseBtnScale = New("UIScale", { Parent = PickerCloseButton, Scale = 1 })
+
+local CloseCrossHolder = New("Frame", {
+	Parent = PickerCloseButton,
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(12, 12),
+	BackgroundTransparency = 1,
+	ZIndex = 13
+})
+
+local CloseBar1 = New("Frame", {
+	Parent = CloseCrossHolder,
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(12, 2),
+	Rotation = 45,
+	BackgroundColor3 = Theme.SubText,
+	BorderSizePixel = 0,
+	ZIndex = 14
+}, { Corner(1) })
+
+local CloseBar2 = New("Frame", {
+	Parent = CloseCrossHolder,
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.fromScale(0.5, 0.5),
+	Size = UDim2.fromOffset(12, 2),
+	Rotation = -45,
+	BackgroundColor3 = Theme.SubText,
+	BorderSizePixel = 0,
+	ZIndex = 14
+}, { Corner(1) })
+
+PickerCloseButton.MouseEnter:Connect(function()
+	Tween(PickerCloseButton, { BackgroundColor3 = Color3.fromRGB(30, 30, 30) }, 0.16)
+	Tween(CloseBtnStroke, { Color = Theme.White }, 0.16)
+	Tween(CloseBtnScale, { Scale = 1.08 }, 0.2, Enum.EasingStyle.Back)
+	Tween(CloseCrossHolder, { Rotation = 90 }, 0.24, Enum.EasingStyle.Quart)
+	Tween(CloseBar1, { BackgroundColor3 = Theme.White }, 0.16)
+	Tween(CloseBar2, { BackgroundColor3 = Theme.White }, 0.16)
+end)
+
+PickerCloseButton.MouseLeave:Connect(function()
+	Tween(PickerCloseButton, { BackgroundColor3 = Theme.Card }, 0.16)
+	Tween(CloseBtnStroke, { Color = Theme.Stroke }, 0.16)
+	Tween(CloseBtnScale, { Scale = 1 }, 0.18)
+	Tween(CloseCrossHolder, { Rotation = 0 }, 0.22, Enum.EasingStyle.Quart)
+	Tween(CloseBar1, { BackgroundColor3 = Theme.SubText }, 0.16)
+	Tween(CloseBar2, { BackgroundColor3 = Theme.SubText }, 0.16)
+end)
+
+PickerCloseButton.MouseButton1Down:Connect(function()
+	Tween(CloseBtnScale, { Scale = 0.88 }, 0.08)
+end)
+
+PickerCloseButton.MouseButton1Up:Connect(function()
+	Tween(CloseBtnScale, { Scale = 1 }, 0.12)
+end)
 
 local WheelHolder = New("Frame", {
 	Parent = PickerSheet,
 	AnchorPoint = Vector2.new(0.5, 0),
-	Position = UDim2.new(0.5, 0, 0, 46),
+	Position = UDim2.new(0.5, 0, 0, 50),
 	Size = UDim2.fromOffset(WHEEL_SIZE, WHEEL_SIZE),
 	BackgroundTransparency = 1
 })
@@ -1218,7 +1368,7 @@ local WheelHit = New("TextButton", {
 
 New("TextLabel", {
 	Parent = PickerSheet,
-	Position = UDim2.fromOffset(24, 246),
+	Position = UDim2.fromOffset(24, 250),
 	Size = UDim2.new(0.6, 0, 0, 16),
 	BackgroundTransparency = 1,
 	Text = "Brightness",
@@ -1228,9 +1378,10 @@ New("TextLabel", {
 	TextXAlignment = Enum.TextXAlignment.Left
 })
 
-local BrightnessValue = CreateValueLabel(PickerSheet, 100, UDim2.new(1, -24, 0, 245))
+local BrightnessValue = CreateValueLabel(PickerSheet, 100, UDim2.new(1, -24, 0, 249))
 
 local RefreshPicker
+local RememberColor
 
 local function GetPickerColor()
 	if PickerState.WhiteLock then
@@ -1240,7 +1391,7 @@ local function GetPickerColor()
 end
 
 local _, BrightnessTrack, SetBrightness = CreateSlider(
-	PickerSheet, UDim2.fromOffset(24, 268), UDim2.new(1, -48, 0, 18),
+	PickerSheet, UDim2.fromOffset(24, 272), UDim2.new(1, -48, 0, 18),
 	0, 100, 100, BrightnessValue,
 	function(value)
 		PickerState.V = value / 100
@@ -1250,7 +1401,15 @@ local _, BrightnessTrack, SetBrightness = CreateSlider(
 			PickerState.Callback(Color3.fromHSV(PickerState.H, PickerState.S, PickerState.V))
 		end
 	end,
-	{ NoFill = true, TrackHeight = 8 }
+	{
+		NoFill = true,
+		TrackHeight = 8,
+		OnRelease = function()
+			if RememberColor then
+				RememberColor(GetPickerColor())
+			end
+		end
+	}
 )
 
 BrightnessTrack.BackgroundColor3 = Color3.new(1, 1, 1)
@@ -1258,7 +1417,7 @@ local BrightnessGradient = New("UIGradient", { Parent = BrightnessTrack })
 
 local PreviewSwatch = New("Frame", {
 	Parent = PickerSheet,
-	Position = UDim2.fromOffset(24, 304),
+	Position = UDim2.fromOffset(24, 310),
 	Size = UDim2.fromOffset(32, 32),
 	BackgroundColor3 = Color3.new(1, 1, 1),
 	BorderSizePixel = 0
@@ -1267,7 +1426,7 @@ local PreviewSwatch = New("Frame", {
 local HexStroke = Stroke(Theme.Stroke, 1)
 local HexBox = New("TextBox", {
 	Parent = PickerSheet,
-	Position = UDim2.fromOffset(66, 304),
+	Position = UDim2.fromOffset(66, 310),
 	Size = UDim2.fromOffset(110, 32),
 	BackgroundColor3 = Theme.Card,
 	BorderSizePixel = 0,
@@ -1280,9 +1439,9 @@ local HexBox = New("TextBox", {
 	ClearTextOnFocus = false
 }, { Corner(8), HexStroke })
 
-local RecentLabel = New("TextLabel", {
+New("TextLabel", {
 	Parent = PickerSheet,
-	Position = UDim2.fromOffset(24, 344),
+	Position = UDim2.fromOffset(24, 354),
 	Size = UDim2.fromOffset(100, 16),
 	BackgroundTransparency = 1,
 	Text = "RECENT",
@@ -1294,7 +1453,7 @@ local RecentLabel = New("TextLabel", {
 
 local RecentHolder = New("Frame", {
 	Parent = PickerSheet,
-	Position = UDim2.fromOffset(24, 362),
+	Position = UDim2.fromOffset(24, 372),
 	Size = UDim2.new(1, -48, 0, 28),
 	BackgroundTransparency = 1
 })
@@ -1302,8 +1461,8 @@ local RecentHolder = New("Frame", {
 local WhiteResetButton = New("TextButton", {
 	Parent = PickerSheet,
 	AnchorPoint = Vector2.new(1, 0),
-	Position = UDim2.new(1, -24, 0, 342),
-	Size = UDim2.fromOffset(74, 18),
+	Position = UDim2.new(1, -24, 0, 352),
+	Size = UDim2.fromOffset(74, 20),
 	BackgroundColor3 = Theme.Card,
 	Text = "WHITE",
 	TextColor3 = Theme.Text,
@@ -1312,22 +1471,6 @@ local WhiteResetButton = New("TextButton", {
 	AutoButtonColor = false,
 	BorderSizePixel = 0
 }, { Corner(5), Stroke(Theme.Stroke, 1) })
-
-local DoneButton = New("TextButton", {
-	Parent = PickerSheet,
-	Position = UDim2.fromOffset(24, 402),
-	Size = UDim2.new(1, -48, 0, 34),
-	BackgroundColor3 = Theme.White,
-	Text = "DONE",
-	TextColor3 = Theme.Black,
-	Font = Enum.Font.GothamBold,
-	TextSize = 12,
-	AutoButtonColor = false,
-	BorderSizePixel = 0
-}, { Corner(8) })
-
-DoneButton.MouseEnter:Connect(function() Tween(DoneButton, { BackgroundColor3 = Color3.fromRGB(215, 215, 215) }, 0.12) end)
-DoneButton.MouseLeave:Connect(function() Tween(DoneButton, { BackgroundColor3 = Theme.White }, 0.12) end)
 
 local function ToHex(color)
 	return string.format("#%02X%02X%02X", Round(color.R * 255), Round(color.G * 255), Round(color.B * 255))
@@ -1344,7 +1487,7 @@ local function FromHex(text)
 	return nil
 end
 
-local function RememberColor(color)
+RememberColor = function(color)
 	local hex = ToHex(color)
 	for i = #RecentColors, 1, -1 do
 		if ToHex(RecentColors[i]) == hex then
@@ -1379,7 +1522,7 @@ for i = 1, 3 do
 		if recent then
 			PickerState.H, PickerState.S, PickerState.V = recent:ToHSV()
 			PickerState.WhiteLock = false
-			EmitPicker()
+			EmitPicker(true)
 		end
 	end)
 end
@@ -1387,8 +1530,7 @@ end
 WhiteResetButton.MouseButton1Click:Connect(function()
 	PickerState.H, PickerState.S = 0, 0
 	PickerState.WhiteLock = true
-	EmitPicker()
-	RememberColor(Color3.new(1, 1, 1))
+	EmitPicker(true)
 end)
 
 RefreshPicker = function()
@@ -1405,9 +1547,11 @@ RefreshPicker = function()
 	SetBrightness(Round(PickerState.V * 100))
 end
 
-EmitPicker = function()
+EmitPicker = function(saveRecent)
 	RefreshPicker()
-	RememberColor(GetPickerColor())
+	if saveRecent then
+		RememberColor(GetPickerColor())
+	end
 	if PickerState.Callback then
 		PickerState.Callback(GetPickerColor())
 	end
@@ -1422,10 +1566,10 @@ local function WheelFromInput(input)
 
 	PickerState.WhiteLock = false
 	PickerState.S = math.clamp(dist / radius, 0, 1)
-	if dist > 3 then
+	if dist > 1 then
 		PickerState.H = (math.deg(math.atan2(delta.X, -delta.Y)) % 360) / 360
 	end
-	EmitPicker()
+	EmitPicker(false)
 end
 
 WheelHit.InputBegan:Connect(function(input)
@@ -1436,11 +1580,16 @@ WheelHit.InputBegan:Connect(function(input)
 end)
 
 UserInputService.InputChanged:Connect(function(input)
-	if wheelDragging and IsPointerMove(input) then WheelFromInput(input) end
+	if wheelDragging and IsPointerMove(input) then
+		WheelFromInput(input)
+	end
 end)
 
 UserInputService.InputEnded:Connect(function(input)
-	if IsPointerStart(input) then wheelDragging = false end
+	if IsPointerStart(input) and wheelDragging then
+		wheelDragging = false
+		RememberColor(GetPickerColor())
+	end
 end)
 
 HexBox.Focused:Connect(function() Tween(HexStroke, { Color = Theme.White }, 0.12) end)
@@ -1450,7 +1599,7 @@ HexBox.FocusLost:Connect(function()
 	if color then
 		PickerState.H, PickerState.S, PickerState.V = color:ToHSV()
 		PickerState.WhiteLock = false
-		EmitPicker()
+		EmitPicker(true)
 	else
 		RefreshPicker()
 	end
@@ -1476,14 +1625,16 @@ local function OpenColorPicker(title, color, callback)
 	RefreshPicker()
 	PickerState.Callback = callback
 	pickerOpen = true
+	CloseCrossHolder.Rotation = 0
+	CloseBtnScale.Scale = 1
 	PickerSheet.Visible = true
 	Tween(PickerSheet, { GroupTransparency = 0 }, 0.18)
 end
 
-DoneButton.MouseButton1Click:Connect(ClosePicker)
 PickerCloseButton.MouseButton1Click:Connect(ClosePicker)
 
-local function CreateColorRow(parent, anchor, position, title, initialColor, onChange)
+local function CreateColorRow(parent, anchor, position, title, getColor, onChange)
+	local initialColor = getColor()
 	local rgb = {
 		Round(initialColor.R * 255),
 		Round(initialColor.G * 255),
@@ -1560,6 +1711,12 @@ local function CreateColorRow(parent, anchor, position, title, initialColor, onC
 			onChange(currentColor())
 		end)
 	end)
+
+	table.insert(SyncUIControls, function()
+		local c = getColor()
+		rgb = { Round(c.R * 255), Round(c.G * 255), Round(c.B * 255) }
+		refresh()
+	end)
 end
 
 local function UpdateCharacterHighlight(player)
@@ -1571,7 +1728,7 @@ local function UpdateCharacterHighlight(player)
 	local teamName = player.Team and player.Team.Name
 	local config = teamName and TeamConfig[teamName]
 
-	if config and config.Enabled then
+	if config and config.Enabled and IsESPVisibleForLocalTeam(config.ShowIn) then
 		if not highlight then
 			highlight = Instance.new("Highlight")
 			highlight.Name = "TeamESP_Highlight"
@@ -1593,15 +1750,12 @@ local function UpdateAllPlayers()
 	end
 end
 
--- Object ESP: Generator и Pallet ищутся по имени (Model/BasePart, в имени
--- которых есть generator или pallet, без учёта регистра).
--- ESP окон полностью удалён.
-local MAX_HIGHLIGHTS = 255 -- лимит Roblox на одновременно отображаемые Highlight
-local OBJECT_ESP_MAX_DISTANCE = 400 -- studs от камеры
+local MAX_HIGHLIGHTS = 255
+local OBJECT_ESP_MAX_DISTANCE = 400
 
 local ActiveObjectHighlights = {}
-local ObjectCandidates = {} -- instance -> "Generator" | "Pallet"
-local ObjectNames = {}      -- instance -> последнее известное имя
+local ObjectCandidates = {}
+local ObjectNames = {}
 
 local ObjectKeywords = {
 	{ Key = "Generator", Lower = "generator" },
@@ -1609,12 +1763,6 @@ local ObjectKeywords = {
 }
 
 local ObjectPriority = { Generator = 1, Pallet = 2 }
-
-local function IsObjectESPAllowed()
-	local team = LocalPlayer.Team
-	local teamName = team and team.Name
-	return teamName == "Survivors" or teamName == "Killer"
-end
 
 local function ClassifyObject(instance)
 	if not (instance:IsA("Model") or instance:IsA("BasePart")) then
@@ -1649,14 +1797,12 @@ local function RemoveObjectHighlight(instance)
 	end
 end
 
--- Не подсвечиваем вложенный объект, если его родитель уже подсвечивается.
--- Проверка общая для всех категорий, чтобы разные типы ESP не накладывались.
 local function HasHighlightedClassifiedAncestor(instance, cameraPosition)
 	local parent = instance.Parent
 	while parent and parent ~= Workspace do
 		local parentKeyword = ObjectCandidates[parent]
 		local parentConfig = parentKeyword and ObjectESPConfig[parentKeyword]
-		if parentConfig and parentConfig.Enabled then
+		if parentConfig and parentConfig.Enabled and IsESPVisibleForLocalTeam(parentConfig.ShowIn) then
 			local ok, position = pcall(function()
 				if parent:IsA("Model") then return parent:GetPivot().Position end
 				if parent:IsA("BasePart") then return parent.Position end
@@ -1709,15 +1855,16 @@ local function EnsureObjectHighlight(instance, config)
 	end
 end
 
--- Полная пересборка подсветок (вкл/выкл ESP, смена команды, watchdog).
--- Проходит только по кэшу объектов, Workspace не сканируется.
 local function RefreshObjectHighlights()
-	local anyEnabled = false
+	local anyAllowed = false
 	for _, config in pairs(ObjectESPConfig) do
-		if config.Enabled then anyEnabled = true break end
+		if config.Enabled and IsESPVisibleForLocalTeam(config.ShowIn) then
+			anyAllowed = true
+			break
+		end
 	end
 
-	if not (anyEnabled and IsObjectESPAllowed()) then
+	if not anyAllowed then
 		for instance in pairs(ActiveObjectHighlights) do
 			RemoveObjectHighlight(instance)
 		end
@@ -1739,13 +1886,13 @@ local function RefreshObjectHighlights()
 			ObjectCandidates[instance] = nil
 			ObjectNames[instance] = nil
 		else
-			-- Если объект переименовали, перепроверяем его категорию.
 			if instance.Name ~= ObjectNames[instance] then
 				keyword = RegisterObject(instance)
 			end
 			if keyword then
 				local config = ObjectESPConfig[keyword]
-				if config and config.Enabled and not HasHighlightedClassifiedAncestor(instance, camPos) then
+				if config and config.Enabled and IsESPVisibleForLocalTeam(config.ShowIn)
+					and not HasHighlightedClassifiedAncestor(instance, camPos) then
 					local ok, position = pcall(ObjectPosition, instance)
 					if ok and position then
 						local distance = (position - camPos).Magnitude
@@ -1763,22 +1910,19 @@ local function RefreshObjectHighlights()
 		end
 	end
 
-	-- Сначала ближайшие; при одинаковой дистанции используется приоритет категории.
 	table.sort(wanted, function(a, b)
-			if math.abs(a.Distance - b.Distance) > 0.01 then
-				return a.Distance < b.Distance
-			end
-			return a.Priority < b.Priority
+		if math.abs(a.Distance - b.Distance) > 0.01 then
+			return a.Distance < b.Distance
+		end
+		return a.Priority < b.Priority
 	end)
 
-	-- Учитываем Highlight игроков и лимит Roblox в 255 объектов.
 	local budget = math.max(0, MAX_HIGHLIGHTS - CountPlayerHighlights())
 	local keep = {}
 	for i = 1, math.min(#wanted, budget) do
 		keep[wanted[i].Instance] = wanted[i].Config
 	end
 
-	-- Сначала удаляем лишнее, затем создаём/обновляем выбранные подсветки.
 	for instance in pairs(ActiveObjectHighlights) do
 		if not keep[instance] then
 			RemoveObjectHighlight(instance)
@@ -1789,7 +1933,6 @@ local function RefreshObjectHighlights()
 	end
 end
 
--- Быстрая смена цвета: трогает только уже созданные подсветки категории.
 local function UpdateObjectColors(keyword)
 	local config = ObjectESPConfig[keyword]
 	if not config then return end
@@ -1811,7 +1954,6 @@ Workspace.DescendantRemoving:Connect(function(instance)
 	end
 end)
 
--- Единственный начальный скан Workspace (по частям, чтобы не было фриза).
 task.spawn(function()
 	local descendants = Workspace:GetDescendants()
 	for i, instance in ipairs(descendants) do
@@ -1823,7 +1965,6 @@ task.spawn(function()
 	pcall(RefreshObjectHighlights)
 end)
 
--- Watchdog: чинит подсветку, если игра что-то изменила у объекта.
 task.spawn(function()
 	while true do
 		task.wait(0.25)
@@ -1858,8 +1999,6 @@ local CrosshairGui = New("ScreenGui", {
 	Parent = PlayerGui
 })
 
--- Курсор находится в отдельном ScreenGui поверх меню. Он не перехватывает ввод,
--- поэтому клики проходят к кнопкам и другим элементам интерфейса под ним.
 local CursorGui = New("ScreenGui", {
 	Name = "CustomCursorOverlay",
 	ResetOnSpawn = false,
@@ -2002,47 +2141,187 @@ local function BuildCustomCursor()
 	BuildMarker(CursorConfig, CursorRoot, CursorRoot.Position)
 end
 
-local NextEspOrder = Counter()
-
-local function CreateToggleCard(page, order, name, initial, callback)
+local function CreateToggleCard(page, order, name, getVal, callback)
 	local card = CreateCard(page, order, 46)
 	CreateLabel(card, name, UDim2.fromOffset(14, 0), UDim2.new(1, -80, 1, 0))
-	local _, setState = CreateToggle(card, UDim2.new(1, -14, 0.5, 0), initial, callback)
+	local _, setState = CreateToggle(card, UDim2.new(1, -14, 0.5, 0), getVal(), callback)
+	table.insert(SyncUIControls, function()
+		setState(getVal(), false)
+	end)
 	return card, setState
 end
 
-local function CreateSliderCard(page, order, name, minValue, maxValue, initial, callback)
+local function CreateSliderCard(page, order, name, minValue, maxValue, getVal, callback)
 	local card = CreateCard(page, order, 68)
 	CreateLabel(card, name, UDim2.fromOffset(14, 10), UDim2.new(0.6, 0, 0, 18))
-	local valueLabel = CreateValueLabel(card, initial, UDim2.new(1, -14, 0, 10))
-	CreateSlider(card, UDim2.fromOffset(14, 38), UDim2.new(1, -28, 0, 18),
-		minValue, maxValue, initial, valueLabel, callback)
+	local valueLabel = CreateValueLabel(card, getVal(), UDim2.new(1, -14, 0, 10))
+	local _, _, setValue = CreateSlider(card, UDim2.fromOffset(14, 38), UDim2.new(1, -28, 0, 18),
+		minValue, maxValue, getVal(), valueLabel, callback)
+	table.insert(SyncUIControls, function()
+		setValue(getVal())
+	end)
 	return card
 end
 
+local NextEspOrder = Counter()
+
 local function CreateTeamCard(name, config)
-	local card = CreateCard(EspPage, NextEspOrder(), 80)
-	CreateLabel(card, name, UDim2.fromOffset(14, 0), UDim2.new(1, -80, 0, 48))
-	CreateToggle(card, UDim2.new(1, -14, 0, 24), config.Enabled, function(state)
+	local card = CreateCard(EspPage, NextEspOrder(), 110)
+	CreateLabel(card, name, UDim2.fromOffset(14, 0), UDim2.new(1, -80, 0, 46))
+	local _, setState = CreateToggle(card, UDim2.new(1, -14, 0, 23), config.Enabled, function(state)
 		config.Enabled = state
 		UpdateAllPlayers()
 	end)
-	CreateColorRow(card, Vector2.new(0, 0), UDim2.fromOffset(14, 50), name .. " color", config.Color, function(color)
-		config.Color = color
-		UpdateAllPlayers()
+	CreateColorRow(card, Vector2.new(0, 0), UDim2.fromOffset(14, 48), name .. " color",
+		function() return config.Color end,
+		function(color)
+			config.Color = color
+			UpdateAllPlayers()
+		end
+	)
+	local refreshChecks = CreateCheckboxRow(card, UDim2.fromOffset(14, 78), config.ShowIn, UpdateAllPlayers)
+	table.insert(SyncUIControls, function()
+		setState(config.Enabled, false)
+		refreshChecks()
 	end)
 end
 
-local function CreateBeamCard()
-	local card = CreateCard(EspPage, NextEspOrder(), 134)
+CreateSectionLabel(EspPage, NextEspOrder(), "Teams")
+for _, teamName in ipairs({ "Survivors", "Killer", "Spectator" }) do
+	CreateTeamCard(teamName, TeamConfig[teamName])
+end
+
+local function CreateObjectESPCard(name, config, displayName)
+	local card = CreateCard(EspPage, NextEspOrder(), 110)
+	CreateLabel(card, (displayName or name) .. " ESP", UDim2.fromOffset(14, 0), UDim2.new(1, -80, 0, 46))
+	local _, setState = CreateToggle(card, UDim2.new(1, -14, 0, 23), config.Enabled, function(enabled)
+		config.Enabled = enabled
+		RefreshObjectHighlights()
+	end)
+	CreateColorRow(card, Vector2.new(0, 0), UDim2.fromOffset(14, 48), name .. " color",
+		function() return config.Color end,
+		function(color)
+			config.Color = color
+			UpdateObjectColors(name)
+		end
+	)
+	local refreshChecks = CreateCheckboxRow(card, UDim2.fromOffset(14, 78), config.ShowIn, RefreshObjectHighlights)
+	table.insert(SyncUIControls, function()
+		setState(config.Enabled, false)
+		refreshChecks()
+	end)
+end
+
+CreateSectionLabel(EspPage, NextEspOrder(), "Objects")
+CreateObjectESPCard("Generator", ObjectESPConfig.Generator)
+CreateObjectESPCard("Pallet", ObjectESPConfig.Pallet)
+
+-- ============================================================
+-- Вкладка VISUALS
+-- ============================================================
+local NextVisOrder = Counter()
+
+CreateSectionLabel(VisPage, NextVisOrder(), "Camera")
+
+CreateSliderCard(VisPage, NextVisOrder(), "FOV Changer", 70, 120, function() return VisualsConfig.FOV end, function(val)
+	VisualsConfig.FOV = val
+	VisualsConfig.FOVEnabled = true
+end)
+
+CreateToggleCard(VisPage, NextVisOrder(), "Camera zoom", function() return VisualsConfig.Zoom end, function(enabled)
+	SetZoomEnabled(enabled)
+end)
+
+CreateSliderCard(VisPage, NextVisOrder(), "Zoom distance", 1, 128, function() return VisualsConfig.ZoomDistance end, function(value)
+	VisualsConfig.ZoomDistance = value
+	EnforceZoom()
+end)
+
+CreateToggleCard(VisPage, NextVisOrder(), "Stretch 4:3", function() return VisualsConfig.Stretch end, function(enabled)
+	VisualsConfig.Stretch = enabled
+end)
+
+CreateToggleCard(VisPage, NextVisOrder(), "Disable Blur", function() return VisualsConfig.NoBlur end, function(enabled)
+	VisualsConfig.NoBlur = enabled
+	ApplyNoBlur(enabled)
+end)
+
+CreateSectionLabel(VisPage, NextVisOrder(), "World")
+
+CreateToggleCard(VisPage, NextVisOrder(), "Fullbright", function() return VisualsConfig.Fullbright end, function(enabled)
+	VisualsConfig.Fullbright = enabled
+	if enabled then
+		origBrightness = Lighting.Brightness
+		origClockTime = Lighting.ClockTime
+		EnforceFullbright()
+	else
+		Lighting.Brightness = origBrightness
+		Lighting.ClockTime = origClockTime
+	end
+end)
+
+CreateToggleCard(VisPage, NextVisOrder(), "Disable Shadows", function() return VisualsConfig.NoShadows end, function(enabled)
+	VisualsConfig.NoShadows = enabled
+	Lighting.GlobalShadows = not enabled
+end)
+
+CreateToggleCard(VisPage, NextVisOrder(), "Disable Fog", function() return VisualsConfig.NoFog end, function(enabled)
+	VisualsConfig.NoFog = enabled
+	if enabled then
+		origFogEnd = Lighting.FogEnd
+		EnforceNoFog()
+	else
+		RestoreFog()
+	end
+end)
+
+CreateSectionLabel(VisPage, NextVisOrder(), "Killer Light")
+
+CreateToggleCard(VisPage, NextVisOrder(), "Killer Light", function() return KillerLightConfig.Enabled end, function(enabled)
+	KillerLightConfig.Enabled = enabled
+	if not enabled then ClearKillerLights() end
+end)
+
+do
+	local card = CreateCard(VisPage, NextVisOrder(), 50)
+	CreateLabel(card, "Light color", UDim2.fromOffset(14, 0), UDim2.new(0.5, 0, 1, 0))
+	CreateColorRow(card, Vector2.new(1, 0.5), UDim2.new(1, -14, 0.5, 0),
+		"Killer Light color",
+		function() return KillerLightConfig.Color end,
+		function(color)
+			KillerLightConfig.Color = color
+		end
+	)
+end
+
+CreateSliderCard(VisPage, NextVisOrder(), "Light brightness", 0, 10, function() return KillerLightConfig.Brightness end, function(value)
+	KillerLightConfig.Brightness = value
+end)
+
+CreateSliderCard(VisPage, NextVisOrder(), "Light range", 0, 60, function() return KillerLightConfig.Range end, function(value)
+	KillerLightConfig.Range = value
+end)
+
+CreateSliderCard(VisPage, NextVisOrder(), "Light angle", 0, 180, function() return KillerLightConfig.Angle end, function(value)
+	KillerLightConfig.Angle = value
+end)
+
+-- Beam перемещён в Visuals
+CreateSectionLabel(VisPage, NextVisOrder(), "Beam")
+
+do
+	local card = CreateCard(VisPage, NextVisOrder(), 134)
 	CreateLabel(card, "Killer Beam", UDim2.fromOffset(14, 0), UDim2.new(1, -80, 0, 48))
-	CreateToggle(card, UDim2.new(1, -14, 0, 24), KillerBeamConfig.Enabled, function(state)
+	local _, setState = CreateToggle(card, UDim2.new(1, -14, 0, 24), KillerBeamConfig.Enabled, function(state)
 		KillerBeamConfig.Enabled = state
 		if not state then ClearBeams() end
 	end)
-	CreateColorRow(card, Vector2.new(0, 0), UDim2.fromOffset(14, 50), "Beam color", KillerBeamConfig.Color, function(color)
-		KillerBeamConfig.Color = color
-	end)
+	CreateColorRow(card, Vector2.new(0, 0), UDim2.fromOffset(14, 50), "Beam color",
+		function() return KillerBeamConfig.Color end,
+		function(color)
+			KillerBeamConfig.Color = color
+		end
+	)
 
 	New("TextLabel", {
 		Parent = card,
@@ -2056,123 +2335,23 @@ local function CreateBeamCard()
 		TextXAlignment = Enum.TextXAlignment.Left
 	})
 	local valueLabel = CreateValueLabel(card, KillerBeamConfig.Length, UDim2.new(1, -14, 0, 85))
-	CreateSlider(card, UDim2.fromOffset(14, 106), UDim2.new(1, -28, 0, 18), 50, 500,
+	local _, _, setLength = CreateSlider(card, UDim2.fromOffset(14, 106), UDim2.new(1, -28, 0, 18), 50, 500,
 		KillerBeamConfig.Length, valueLabel, function(value)
 			KillerBeamConfig.Length = value
 		end)
+
+	table.insert(SyncUIControls, function()
+		setState(KillerBeamConfig.Enabled, false)
+		setLength(KillerBeamConfig.Length)
+	end)
 end
 
-CreateSectionLabel(EspPage, NextEspOrder(), "Teams")
-for _, teamName in ipairs({ "Survivors", "Killer", "Spectator" }) do
-	CreateTeamCard(teamName, TeamConfig[teamName])
-end
-
-local function CreateObjectESPCard(name, config, displayName)
-    local card = CreateCard(EspPage, NextEspOrder(), 80)
-    CreateLabel(card, (displayName or name) .. " ESP", UDim2.fromOffset(14, 0), UDim2.new(1, -80, 0, 48))
-    CreateToggle(card, UDim2.new(1, -14, 0, 24), config.Enabled, function(enabled)
-        config.Enabled = enabled
-        RefreshObjectHighlights()
-    end)
-    CreateColorRow(card, Vector2.new(0, 0), UDim2.fromOffset(14, 50), name .. " color", config.Color, function(color)
-        config.Color = color
-        UpdateObjectColors(name)
-    end)
-end
-
-CreateSectionLabel(EspPage, NextEspOrder(), "Objects")
-CreateObjectESPCard("Generator", ObjectESPConfig.Generator)
-CreateObjectESPCard("Pallet", ObjectESPConfig.Pallet)
-
-CreateSectionLabel(EspPage, NextEspOrder(), "Beam")
-CreateBeamCard()
-
-local NextVisOrder = Counter()
-
-CreateSectionLabel(VisPage, NextVisOrder(), "Camera")
-
-CreateSliderCard(VisPage, NextVisOrder(), "FOV Changer", 70, 120, 70, function(val)
-	VisualsConfig.FOV = val
-	VisualsConfig.FOVEnabled = true
-end)
-
-CreateToggleCard(VisPage, NextVisOrder(), "Camera zoom", false, function(enabled)
-	SetZoomEnabled(enabled)
-end)
-
-CreateSliderCard(VisPage, NextVisOrder(), "Zoom distance", 1, 128, VisualsConfig.ZoomDistance, function(value)
-	VisualsConfig.ZoomDistance = value
-	EnforceZoom()
-end)
-
-CreateToggleCard(VisPage, NextVisOrder(), "Stretch 4:3", false, function(enabled)
-	VisualsConfig.Stretch = enabled
-end)
-
-CreateSectionLabel(VisPage, NextVisOrder(), "World")
-
-CreateToggleCard(VisPage, NextVisOrder(), "Fullbright", false, function(enabled)
-	VisualsConfig.Fullbright = enabled
-	if enabled then
-		origBrightness = Lighting.Brightness
-		origClockTime = Lighting.ClockTime
-		EnforceFullbright()
-	else
-		Lighting.Brightness = origBrightness
-		Lighting.ClockTime = origClockTime
-	end
-end)
-
-CreateToggleCard(VisPage, NextVisOrder(), "Disable Shadows", false, function(enabled)
-	VisualsConfig.NoShadows = enabled
-	Lighting.GlobalShadows = not enabled
-end)
-
-CreateToggleCard(VisPage, NextVisOrder(), "Disable Fog", false, function(enabled)
-	VisualsConfig.NoFog = enabled
-	if enabled then
-		origFogEnd = Lighting.FogEnd
-		EnforceNoFog()
-	else
-		RestoreFog()
-	end
-end)
-
-CreateToggleCard(VisPage, NextVisOrder(), "Disable Blur", false, function(enabled)
-	VisualsConfig.NoBlur = enabled
-	ApplyNoBlur(enabled)
-end)
-
-CreateSectionLabel(VisPage, NextVisOrder(), "Killer Light")
-
-CreateToggleCard(VisPage, NextVisOrder(), "Killer Light", KillerLightConfig.Enabled, function(enabled)
-	KillerLightConfig.Enabled = enabled
-end)
-
-do
-	local card = CreateCard(VisPage, NextVisOrder(), 50)
-	CreateLabel(card, "Light color", UDim2.fromOffset(14, 0), UDim2.new(0.5, 0, 1, 0))
-	CreateColorRow(card, Vector2.new(1, 0.5), UDim2.new(1, -14, 0.5, 0),
-		"Killer Light color", KillerLightConfig.Color, function(color)
-			KillerLightConfig.Color = color
-		end)
-end
-
-CreateSliderCard(VisPage, NextVisOrder(), "Light brightness", 0, 10, KillerLightConfig.Brightness, function(value)
-	KillerLightConfig.Brightness = value
-end)
-
-CreateSliderCard(VisPage, NextVisOrder(), "Light range", 0, 60, KillerLightConfig.Range, function(value)
-	KillerLightConfig.Range = value
-end)
-
-CreateSliderCard(VisPage, NextVisOrder(), "Light angle", 0, 180, KillerLightConfig.Angle, function(value)
-	KillerLightConfig.Angle = value
-end)
-
+-- ============================================================
+-- Вкладка CROSSHAIR
+-- ============================================================
 local NextCrossOrder = Counter()
 
-local function CreateShapeSelector(page, order, shapes, initial, onChange)
+local function CreateShapeSelector(page, order, shapes, getShape, onChange)
 	local rows = math.ceil(#shapes / 3)
 	local gridHeight = rows * 30 + (rows - 1) * 8
 	local card = CreateCard(page, order, gridHeight + 28)
@@ -2191,7 +2370,7 @@ local function CreateShapeSelector(page, order, shapes, initial, onChange)
 	})
 
 	local buttons = {}
-	local selected = initial
+	local selected = getShape()
 
 	local function render(animate)
 		for name, entry in pairs(buttons) do
@@ -2233,12 +2412,18 @@ local function CreateShapeSelector(page, order, shapes, initial, onChange)
 	end
 
 	render(false)
+
+	table.insert(SyncUIControls, function()
+		selected = getShape()
+		render(false)
+	end)
+
 	return card
 end
 
 CreateSectionLabel(CrossPage, NextCrossOrder(), "Crosshair")
 
-CreateToggleCard(CrossPage, NextCrossOrder(), "Enabled", CrosshairConfig.Enabled, function(state)
+CreateToggleCard(CrossPage, NextCrossOrder(), "Enabled", function() return CrosshairConfig.Enabled end, function(state)
 	CrosshairConfig.Enabled = state
 	BuildCrosshair()
 end)
@@ -2247,7 +2432,7 @@ CreateSectionLabel(CrossPage, NextCrossOrder(), "Shape")
 
 CreateShapeSelector(CrossPage, NextCrossOrder(),
 	{ "Cross", "Plus", "Dot", "Circle", "Square", "X" },
-	CrosshairConfig.Shape,
+	function() return CrosshairConfig.Shape end,
 	function(name)
 		CrosshairConfig.Shape = name
 		BuildCrosshair()
@@ -2255,12 +2440,12 @@ CreateShapeSelector(CrossPage, NextCrossOrder(),
 
 CreateSectionLabel(CrossPage, NextCrossOrder(), "Style")
 
-CreateSliderCard(CrossPage, NextCrossOrder(), "Size", 4, 80, CrosshairConfig.Size, function(value)
+CreateSliderCard(CrossPage, NextCrossOrder(), "Size", 4, 80, function() return CrosshairConfig.Size end, function(value)
 	CrosshairConfig.Size = value
 	BuildCrosshair()
 end)
 
-CreateSliderCard(CrossPage, NextCrossOrder(), "Thickness", 1, 10, CrosshairConfig.Thickness, function(value)
+CreateSliderCard(CrossPage, NextCrossOrder(), "Thickness", 1, 10, function() return CrosshairConfig.Thickness end, function(value)
 	CrosshairConfig.Thickness = value
 	BuildCrosshair()
 end)
@@ -2269,10 +2454,12 @@ do
 	local card = CreateCard(CrossPage, NextCrossOrder(), 46)
 	CreateLabel(card, "Color", UDim2.fromOffset(14, 0), UDim2.new(0.5, 0, 1, 0))
 	CreateColorRow(card, Vector2.new(1, 0.5), UDim2.new(1, -14, 0.5, 0), "Crosshair color",
-		CrosshairConfig.Color, function(color)
+		function() return CrosshairConfig.Color end,
+		function(color)
 			CrosshairConfig.Color = color
 			BuildCrosshair()
-		end)
+		end
+	)
 end
 
 CreateSectionLabel(CrossPage, NextCrossOrder(), "Outline")
@@ -2280,15 +2467,20 @@ CreateSectionLabel(CrossPage, NextCrossOrder(), "Outline")
 do
 	local card = CreateCard(CrossPage, NextCrossOrder(), 80)
 	CreateLabel(card, "Outline", UDim2.fromOffset(14, 0), UDim2.new(1, -80, 0, 48))
-	CreateToggle(card, UDim2.new(1, -14, 0, 24), CrosshairConfig.Outline, function(state)
+	local _, setState = CreateToggle(card, UDim2.new(1, -14, 0, 24), CrosshairConfig.Outline, function(state)
 		CrosshairConfig.Outline = state
 		BuildCrosshair()
 	end)
 	CreateColorRow(card, Vector2.new(0, 0), UDim2.fromOffset(14, 50), "Outline color",
-		CrosshairConfig.OutlineColor, function(color)
+		function() return CrosshairConfig.OutlineColor end,
+		function(color)
 			CrosshairConfig.OutlineColor = color
 			BuildCrosshair()
-		end)
+		end
+	)
+	table.insert(SyncUIControls, function()
+		setState(CrosshairConfig.Outline, false)
+	end)
 end
 
 CreateSectionLabel(CrossPage, NextCrossOrder(), "Position")
@@ -2320,12 +2512,17 @@ local function CreateOffsetCard(name, configKey)
 		setValue(0)
 		BuildCrosshair()
 	end)
+	table.insert(SyncUIControls, function()
+		setValue(CrosshairConfig[configKey])
+	end)
 end
 
 CreateOffsetCard("Offset X", "OffsetX")
 CreateOffsetCard("Offset Y", "OffsetY")
 
-
+-- ============================================================
+-- Вкладка UI
+-- ============================================================
 local NextUIOrder = Counter()
 
 CreateSectionLabel(UIPage, NextUIOrder(), "Menu")
@@ -2334,12 +2531,16 @@ local function CreateMenuSizeCard()
 	local card = CreateCard(UIPage, NextUIOrder(), 82)
 	CreateLabel(card, "Menu size", UDim2.fromOffset(14, 10), UDim2.new(0.6, 0, 0, 18))
 	local valueLabel = CreateValueLabel(card, UIConfig.Width, UDim2.new(1, -14, 0, 10))
-	CreateSlider(card, UDim2.fromOffset(14, 44), UDim2.new(1, -28, 0, 18),
+	local _, _, setValue = CreateSlider(card, UDim2.fromOffset(14, 44), UDim2.new(1, -28, 0, 18),
 		300, 520, UIConfig.Width, valueLabel, function(value)
 			UIConfig.Width = value
 			UIConfig.Height = Round(value * 480 / 380)
 			MainFrame.Size = UDim2.fromOffset(UIConfig.Width, UIConfig.Height)
 		end)
+	table.insert(SyncUIControls, function()
+		setValue(UIConfig.Width)
+		MainFrame.Size = UDim2.fromOffset(UIConfig.Width, UIConfig.Height)
+	end)
 end
 
 CreateMenuSizeCard()
@@ -2364,7 +2565,7 @@ local function CreateToggleKeyCard()
 		waitingForMenuKey = true
 		bindButton.Text = "PRESS A KEY"
 	end)
-	UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	UserInputService.InputBegan:Connect(function(input)
 		if waitingForMenuKey and input.UserInputType == Enum.UserInputType.Keyboard then
 			if input.KeyCode ~= Enum.KeyCode.Unknown then
 				UIConfig.ToggleKey = input.KeyCode
@@ -2374,13 +2575,18 @@ local function CreateToggleKeyCard()
 			end
 		end
 	end)
+	table.insert(SyncUIControls, function()
+		KeyPillLabel.Text = UIConfig.ToggleKey.Name
+		bindButton.Text = UIConfig.ToggleKey.Name
+	end)
 end
 
 CreateToggleKeyCard()
 
+-- Stats window (включая настройки цветов внутри этой же группы)
 CreateSectionLabel(UIPage, NextUIOrder(), "Stats window")
 
-local _, statsToggleSetter = CreateToggleCard(UIPage, NextUIOrder(), "Show stats window", StatsConfig.Enabled, function(enabled)
+local _, statsToggleSetter = CreateToggleCard(UIPage, NextUIOrder(), "Show stats window", function() return StatsConfig.Enabled end, function(enabled)
 	SetStatsEnabled(enabled)
 end)
 setStatsToggleState = statsToggleSetter
@@ -2414,34 +2620,38 @@ local function CreateStatsToggleKeyCard()
 			statsKeyCaptureJustCompleted = true
 		end
 	end)
+	table.insert(SyncUIControls, function()
+		bindButton.Text = StatsConfig.ToggleKey.Name
+	end)
 end
 
 CreateStatsToggleKeyCard()
 
-CreateToggleCard(UIPage, NextUIOrder(), "FPS", StatsConfig.FPS, function(enabled)
+CreateToggleCard(UIPage, NextUIOrder(), "FPS", function() return StatsConfig.FPS end, function(enabled)
 	StatsConfig.FPS = enabled
 	RefreshStatsLayout()
 end)
 
-CreateToggleCard(UIPage, NextUIOrder(), "Ping", StatsConfig.Ping, function(enabled)
+CreateToggleCard(UIPage, NextUIOrder(), "Ping", function() return StatsConfig.Ping end, function(enabled)
 	StatsConfig.Ping = enabled
 	RefreshStatsLayout()
 end)
 
-CreateToggleCard(UIPage, NextUIOrder(), "TPS", StatsConfig.TPS, function(enabled)
+CreateToggleCard(UIPage, NextUIOrder(), "TPS", function() return StatsConfig.TPS end, function(enabled)
 	StatsConfig.TPS = enabled
 	RefreshStatsLayout()
 end)
 
-CreateSectionLabel(UIPage, NextUIOrder(), "Stats colors")
-
 local function CreateStatsColorRow(title, key)
 	local card = CreateCard(UIPage, NextUIOrder(), 46)
 	CreateLabel(card, title, UDim2.fromOffset(14, 0), UDim2.new(0.48, 0, 1, 0))
-	CreateColorRow(card, Vector2.new(1, 0.5), UDim2.new(1, -14, 0.5, 0), "Stats " .. string.lower(title), StatsConfig[key], function(color)
-		StatsConfig[key] = color
-		ApplyStatsColors()
-	end)
+	CreateColorRow(card, Vector2.new(1, 0.5), UDim2.new(1, -14, 0.5, 0), "Stats " .. string.lower(title),
+		function() return StatsConfig[key] end,
+		function(color)
+			StatsConfig[key] = color
+			ApplyStatsColors()
+		end
+	)
 end
 
 CreateStatsColorRow("Background", "Background")
@@ -2453,25 +2663,25 @@ CreateSectionLabel(UIPage, NextUIOrder(), "Custom cursor")
 
 local setCursorToggleState
 local SetCursorEnabled
-local _, cursorToggleSetter = CreateToggleCard(UIPage, NextUIOrder(), "Enabled", CursorConfig.Enabled, function(state)
+local _, cursorToggleSetter = CreateToggleCard(UIPage, NextUIOrder(), "Enabled", function() return CursorConfig.Enabled end, function(state)
 	SetCursorEnabled(state)
 end)
 setCursorToggleState = cursorToggleSetter
 
 CreateShapeSelector(UIPage, NextUIOrder(),
 	{ "Cross", "Plus", "Dot", "Circle", "Square", "X" },
-	CursorConfig.Shape,
+	function() return CursorConfig.Shape end,
 	function(shape)
 		CursorConfig.Shape = shape
 		BuildCustomCursor()
 	end)
 
-CreateSliderCard(UIPage, NextUIOrder(), "Cursor size", 4, 80, CursorConfig.Size, function(value)
+CreateSliderCard(UIPage, NextUIOrder(), "Cursor size", 4, 80, function() return CursorConfig.Size end, function(value)
 	CursorConfig.Size = value
 	BuildCustomCursor()
 end)
 
-CreateSliderCard(UIPage, NextUIOrder(), "Cursor thickness", 1, 10, CursorConfig.Thickness, function(value)
+CreateSliderCard(UIPage, NextUIOrder(), "Cursor thickness", 1, 10, function() return CursorConfig.Thickness end, function(value)
 	CursorConfig.Thickness = value
 	BuildCustomCursor()
 end)
@@ -2480,46 +2690,42 @@ do
 	local card = CreateCard(UIPage, NextUIOrder(), 46)
 	CreateLabel(card, "Cursor color", UDim2.fromOffset(14, 0), UDim2.new(0.5, 0, 1, 0))
 	CreateColorRow(card, Vector2.new(1, 0.5), UDim2.new(1, -14, 0.5, 0), "Cursor color",
-		CursorConfig.Color, function(color)
+		function() return CursorConfig.Color end,
+		function(color)
 			CursorConfig.Color = color
 			BuildCustomCursor()
-		end)
+		end
+	)
 end
 
 do
 	local card = CreateCard(UIPage, NextUIOrder(), 80)
 	CreateLabel(card, "Cursor outline", UDim2.fromOffset(14, 0), UDim2.new(1, -80, 0, 48))
-	CreateToggle(card, UDim2.new(1, -14, 0, 24), CursorConfig.Outline, function(state)
+	local _, setState = CreateToggle(card, UDim2.new(1, -14, 0, 24), CursorConfig.Outline, function(state)
 		CursorConfig.Outline = state
 		BuildCustomCursor()
 	end)
 	CreateColorRow(card, Vector2.new(0, 0), UDim2.fromOffset(14, 50), "Cursor outline color",
-		CursorConfig.OutlineColor, function(color)
+		function() return CursorConfig.OutlineColor end,
+		function(color)
 			CursorConfig.OutlineColor = color
 			BuildCustomCursor()
-		end)
+		end
+	)
+	table.insert(SyncUIControls, function()
+		setState(CursorConfig.Outline, false)
+	end)
 end
 
 local cursorKeyCaptureJustCompleted = false
 local virtualCursorPosition = UserInputService:GetMouseLocation()
 
-local function IsLocalPlayerSpectator()
-	local teamName = LocalPlayer.Team and LocalPlayer.Team.Name
-	-- Поддерживаем оба варианта названия команды.
-	return teamName == "Spectators" or teamName == "Spectator"
-end
-
--- Кастомный курсор разрешён только в командах Survivors и Killer.
--- В Spectator (и вне этих команд) он не работает вообще.
 local function IsCustomCursorAllowed()
 	local teamName = LocalPlayer.Team and LocalPlayer.Team.Name
 	return teamName == "Survivors" or teamName == "Killer"
 end
 
 local function UpdateCursorDisplay()
-	-- Кастомный курсор виден только при открытом меню и включённом
-	-- переключателе. Реальный курсор (MouseIconEnabled и т.п.) не трогаем:
-	-- им управляет игра.
 	CursorRoot.Visible = isOpen and CursorConfig.Enabled and IsCustomCursorAllowed()
 end
 
@@ -2559,9 +2765,13 @@ local function CreateCursorToggleKeyCard()
 			cursorKeyCaptureJustCompleted = true
 		end
 	end)
+	table.insert(SyncUIControls, function()
+		bindButton.Text = CursorConfig.ToggleKey.Name
+	end)
 end
 
 CreateCursorToggleKeyCard()
+
 CreateSectionLabel(UIPage, NextUIOrder(), "Colors")
 
 local function ApplyTheme()
@@ -2573,10 +2783,8 @@ local function ApplyTheme()
 	PickerSheet.BackgroundColor3 = Theme.Background
 	for _, page in ipairs({EspPage, VisPage, CrossPage, UIPage}) do
 		for _, child in ipairs(page:GetChildren()) do
-			if child:IsA("Frame") then
-				if child:FindFirstChildOfClass("UIStroke") then
-					child.BackgroundColor3 = Theme.Card
-				end
+			if child:IsA("Frame") and child:FindFirstChildOfClass("UIStroke") then
+				child.BackgroundColor3 = Theme.Card
 			end
 		end
 	end
@@ -2586,10 +2794,13 @@ end
 local function CreateThemeColorRow(title, key)
 	local card = CreateCard(UIPage, NextUIOrder(), 46)
 	CreateLabel(card, title, UDim2.fromOffset(14, 0), UDim2.new(0.48, 0, 1, 0))
-	CreateColorRow(card, Vector2.new(1, 0.5), UDim2.new(1, -14, 0.5, 0), title, UIConfig[key], function(color)
-		UIConfig[key] = color
-		ApplyTheme()
-	end)
+	CreateColorRow(card, Vector2.new(1, 0.5), UDim2.new(1, -14, 0.5, 0), title,
+		function() return UIConfig[key] end,
+		function(color)
+			UIConfig[key] = color
+			ApplyTheme()
+		end
+	)
 end
 
 CreateThemeColorRow("Background", "Background")
@@ -2597,11 +2808,477 @@ CreateThemeColorRow("Cards", "Card")
 CreateThemeColorRow("Accent", "Accent")
 CreateThemeColorRow("Text", "Text")
 
+-- ============================================================
+-- Система пресетов (сохранение между перезаходами)
+-- ============================================================
+local PRESET_FILE = "ZhirnyeVisuals_Presets.json"
+local PresetStore = {
+	AutoLoad = true,
+	ActivePreset = nil,
+	Presets = {}
+}
+
+local function SerializeColor(c)
+	return { R = Round(c.R * 255), G = Round(c.G * 255), B = Round(c.B * 255) }
+end
+
+local function DeserializeColor(t, fallback)
+	if type(t) == "table" and t.R and t.G and t.B then
+		return Color3.fromRGB(t.R, t.G, t.B)
+	end
+	return fallback
+end
+
+local function CaptureCurrentPreset()
+	return {
+		TeamConfig = {
+			Survivors = {
+				Enabled = TeamConfig.Survivors.Enabled,
+				Color = SerializeColor(TeamConfig.Survivors.Color),
+				ShowIn = table.clone(TeamConfig.Survivors.ShowIn)
+			},
+			Killer = {
+				Enabled = TeamConfig.Killer.Enabled,
+				Color = SerializeColor(TeamConfig.Killer.Color),
+				ShowIn = table.clone(TeamConfig.Killer.ShowIn)
+			},
+			Spectator = {
+				Enabled = TeamConfig.Spectator.Enabled,
+				Color = SerializeColor(TeamConfig.Spectator.Color),
+				ShowIn = table.clone(TeamConfig.Spectator.ShowIn)
+			}
+		},
+		ObjectESPConfig = {
+			Generator = {
+				Enabled = ObjectESPConfig.Generator.Enabled,
+				Color = SerializeColor(ObjectESPConfig.Generator.Color),
+				ShowIn = table.clone(ObjectESPConfig.Generator.ShowIn)
+			},
+			Pallet = {
+				Enabled = ObjectESPConfig.Pallet.Enabled,
+				Color = SerializeColor(ObjectESPConfig.Pallet.Color),
+				ShowIn = table.clone(ObjectESPConfig.Pallet.ShowIn)
+			}
+		},
+		KillerBeamConfig = {
+			Enabled = KillerBeamConfig.Enabled,
+			Color = SerializeColor(KillerBeamConfig.Color),
+			Length = KillerBeamConfig.Length
+		},
+		VisualsConfig = {
+			FOV = VisualsConfig.FOV,
+			FOVEnabled = VisualsConfig.FOVEnabled,
+			Fullbright = VisualsConfig.Fullbright,
+			NoShadows = VisualsConfig.NoShadows,
+			NoFog = VisualsConfig.NoFog,
+			NoBlur = VisualsConfig.NoBlur,
+			Zoom = VisualsConfig.Zoom,
+			ZoomDistance = VisualsConfig.ZoomDistance,
+			Stretch = VisualsConfig.Stretch,
+			StretchY = VisualsConfig.StretchY
+		},
+		KillerLightConfig = {
+			Enabled = KillerLightConfig.Enabled,
+			Color = SerializeColor(KillerLightConfig.Color),
+			Brightness = KillerLightConfig.Brightness,
+			Range = KillerLightConfig.Range,
+			Angle = KillerLightConfig.Angle
+		},
+		CrosshairConfig = {
+			Enabled = CrosshairConfig.Enabled,
+			Shape = CrosshairConfig.Shape,
+			Size = CrosshairConfig.Size,
+			Thickness = CrosshairConfig.Thickness,
+			Color = SerializeColor(CrosshairConfig.Color),
+			Outline = CrosshairConfig.Outline,
+			OutlineColor = SerializeColor(CrosshairConfig.OutlineColor),
+			OffsetX = CrosshairConfig.OffsetX,
+			OffsetY = CrosshairConfig.OffsetY
+		},
+		CursorConfig = {
+			Enabled = CursorConfig.Enabled,
+			ToggleKey = CursorConfig.ToggleKey.Name,
+			Shape = CursorConfig.Shape,
+			Size = CursorConfig.Size,
+			Thickness = CursorConfig.Thickness,
+			Color = SerializeColor(CursorConfig.Color),
+			Outline = CursorConfig.Outline,
+			OutlineColor = SerializeColor(CursorConfig.OutlineColor)
+		},
+		UIConfig = {
+			Width = UIConfig.Width,
+			Height = UIConfig.Height,
+			ToggleKey = UIConfig.ToggleKey.Name,
+			Background = SerializeColor(UIConfig.Background),
+			Card = SerializeColor(UIConfig.Card),
+			Accent = SerializeColor(UIConfig.Accent),
+			Text = SerializeColor(UIConfig.Text)
+		},
+		StatsConfig = {
+			Enabled = StatsConfig.Enabled,
+			FPS = StatsConfig.FPS,
+			Ping = StatsConfig.Ping,
+			TPS = StatsConfig.TPS,
+			ToggleKey = StatsConfig.ToggleKey.Name,
+			Background = SerializeColor(StatsConfig.Background),
+			Border = SerializeColor(StatsConfig.Border),
+			Label = SerializeColor(StatsConfig.Label),
+			Value = SerializeColor(StatsConfig.Value)
+		}
+	}
+end
+
+local function SavePresetsToDisk()
+	if writefile then
+		pcall(function()
+			writefile(PRESET_FILE, HttpService:JSONEncode(PresetStore))
+		end)
+	end
+end
+
+local function LoadPresetsFromDisk()
+	if isfile and readfile then
+		local ok, exists = pcall(isfile, PRESET_FILE)
+		if ok and exists then
+			local okRead, raw = pcall(readfile, PRESET_FILE)
+			if okRead and type(raw) == "string" and #raw > 0 then
+				local okDec, decoded = pcall(function()
+					return HttpService:JSONDecode(raw)
+				end)
+				if okDec and type(decoded) == "table" then
+					PresetStore.AutoLoad = decoded.AutoLoad ~= false
+					PresetStore.ActivePreset = decoded.ActivePreset
+					PresetStore.Presets = type(decoded.Presets) == "table" and decoded.Presets or {}
+				end
+			end
+		end
+	end
+end
+
+local function ApplyShowIn(target, source)
+	if type(source) ~= "table" then return end
+	for _, k in ipairs({ "Survivors", "Killer", "Spectators" }) do
+		if source[k] ~= nil then
+			target[k] = source[k] == true
+		end
+	end
+end
+
+local function ApplyPresetData(data)
+	if type(data) ~= "table" then return end
+
+	if type(data.TeamConfig) == "table" then
+		for _, k in ipairs({ "Survivors", "Killer", "Spectator" }) do
+			local src = data.TeamConfig[k]
+			if type(src) == "table" then
+				TeamConfig[k].Enabled = src.Enabled == true
+				TeamConfig[k].Color = DeserializeColor(src.Color, TeamConfig[k].Color)
+				ApplyShowIn(TeamConfig[k].ShowIn, src.ShowIn)
+			end
+		end
+	end
+
+	if type(data.ObjectESPConfig) == "table" then
+		for _, k in ipairs({ "Generator", "Pallet" }) do
+			local src = data.ObjectESPConfig[k]
+			if type(src) == "table" then
+				ObjectESPConfig[k].Enabled = src.Enabled == true
+				ObjectESPConfig[k].Color = DeserializeColor(src.Color, ObjectESPConfig[k].Color)
+				ApplyShowIn(ObjectESPConfig[k].ShowIn, src.ShowIn)
+			end
+		end
+	end
+
+	if type(data.KillerBeamConfig) == "table" then
+		KillerBeamConfig.Enabled = data.KillerBeamConfig.Enabled == true
+		KillerBeamConfig.Color = DeserializeColor(data.KillerBeamConfig.Color, KillerBeamConfig.Color)
+		if data.KillerBeamConfig.Length then KillerBeamConfig.Length = data.KillerBeamConfig.Length end
+		if not KillerBeamConfig.Enabled then ClearBeams() end
+	end
+
+	if type(data.VisualsConfig) == "table" then
+		local v = data.VisualsConfig
+		if v.FOV then VisualsConfig.FOV = v.FOV end
+		VisualsConfig.FOVEnabled = v.FOVEnabled == true
+		VisualsConfig.Fullbright = v.Fullbright == true
+		if VisualsConfig.Fullbright then
+			EnforceFullbright()
+		else
+			Lighting.Brightness = origBrightness
+			Lighting.ClockTime = origClockTime
+		end
+		VisualsConfig.NoShadows = v.NoShadows == true
+		Lighting.GlobalShadows = not VisualsConfig.NoShadows
+		VisualsConfig.NoFog = v.NoFog == true
+		if VisualsConfig.NoFog then
+			EnforceNoFog()
+		else
+			RestoreFog()
+		end
+		VisualsConfig.NoBlur = v.NoBlur == true
+		ApplyNoBlur(VisualsConfig.NoBlur)
+		if v.ZoomDistance then VisualsConfig.ZoomDistance = v.ZoomDistance end
+		SetZoomEnabled(v.Zoom == true)
+		VisualsConfig.Stretch = v.Stretch == true
+		if v.StretchY then VisualsConfig.StretchY = v.StretchY end
+	end
+
+	if type(data.KillerLightConfig) == "table" then
+		local kl = data.KillerLightConfig
+		KillerLightConfig.Enabled = kl.Enabled == true
+		KillerLightConfig.Color = DeserializeColor(kl.Color, KillerLightConfig.Color)
+		if kl.Brightness then KillerLightConfig.Brightness = kl.Brightness end
+		if kl.Range then KillerLightConfig.Range = kl.Range end
+		if kl.Angle then KillerLightConfig.Angle = kl.Angle end
+		if not KillerLightConfig.Enabled then ClearKillerLights() end
+	end
+
+	if type(data.CrosshairConfig) == "table" then
+		local ch = data.CrosshairConfig
+		CrosshairConfig.Enabled = ch.Enabled == true
+		if ch.Shape then CrosshairConfig.Shape = ch.Shape end
+		if ch.Size then CrosshairConfig.Size = ch.Size end
+		if ch.Thickness then CrosshairConfig.Thickness = ch.Thickness end
+		CrosshairConfig.Color = DeserializeColor(ch.Color, CrosshairConfig.Color)
+		CrosshairConfig.Outline = ch.Outline ~= false
+		CrosshairConfig.OutlineColor = DeserializeColor(ch.OutlineColor, CrosshairConfig.OutlineColor)
+		if ch.OffsetX ~= nil then CrosshairConfig.OffsetX = ch.OffsetX end
+		if ch.OffsetY ~= nil then CrosshairConfig.OffsetY = ch.OffsetY end
+	end
+
+	if type(data.CursorConfig) == "table" then
+		local cu = data.CursorConfig
+		CursorConfig.Enabled = cu.Enabled == true
+		if cu.ToggleKey and Enum.KeyCode[cu.ToggleKey] then
+			CursorConfig.ToggleKey = Enum.KeyCode[cu.ToggleKey]
+		end
+		if cu.Shape then CursorConfig.Shape = cu.Shape end
+		if cu.Size then CursorConfig.Size = cu.Size end
+		if cu.Thickness then CursorConfig.Thickness = cu.Thickness end
+		CursorConfig.Color = DeserializeColor(cu.Color, CursorConfig.Color)
+		CursorConfig.Outline = cu.Outline ~= false
+		CursorConfig.OutlineColor = DeserializeColor(cu.OutlineColor, CursorConfig.OutlineColor)
+	end
+
+	if type(data.UIConfig) == "table" then
+		local ui = data.UIConfig
+		if ui.Width then UIConfig.Width = ui.Width end
+		if ui.Height then UIConfig.Height = ui.Height end
+		if ui.ToggleKey and Enum.KeyCode[ui.ToggleKey] then
+			UIConfig.ToggleKey = Enum.KeyCode[ui.ToggleKey]
+		end
+		UIConfig.Background = DeserializeColor(ui.Background, UIConfig.Background)
+		UIConfig.Card = DeserializeColor(ui.Card, UIConfig.Card)
+		UIConfig.Accent = DeserializeColor(ui.Accent, UIConfig.Accent)
+		UIConfig.Text = DeserializeColor(ui.Text, UIConfig.Text)
+	end
+
+	if type(data.StatsConfig) == "table" then
+		local st = data.StatsConfig
+		StatsConfig.Enabled = st.Enabled == true
+		StatsConfig.FPS = st.FPS ~= false
+		StatsConfig.Ping = st.Ping ~= false
+		StatsConfig.TPS = st.TPS ~= false
+		if st.ToggleKey and Enum.KeyCode[st.ToggleKey] then
+			StatsConfig.ToggleKey = Enum.KeyCode[st.ToggleKey]
+		end
+		StatsConfig.Background = DeserializeColor(st.Background, StatsConfig.Background)
+		StatsConfig.Border = DeserializeColor(st.Border, StatsConfig.Border)
+		StatsConfig.Label = DeserializeColor(st.Label, StatsConfig.Label)
+		StatsConfig.Value = DeserializeColor(st.Value, StatsConfig.Value)
+	end
+
+	for _, syncFn in ipairs(SyncUIControls) do
+		pcall(syncFn)
+	end
+
+	ApplyTheme()
+	ApplyStatsColors()
+	RefreshStatsLayout()
+	BuildCrosshair()
+	BuildCustomCursor()
+	UpdateCursorDisplay()
+	UpdateAllPlayers()
+	RefreshObjectHighlights()
+end
+
+LoadPresetsFromDisk()
+
+CreateSectionLabel(UIPage, NextUIOrder(), "Presets")
+
+CreateToggleCard(UIPage, NextUIOrder(), "Auto-load on rejoin", function() return PresetStore.AutoLoad end, function(state)
+	PresetStore.AutoLoad = state
+	SavePresetsToDisk()
+end)
+
+do
+	local presetsOrder = NextUIOrder()
+	local presetsCard = CreateCard(UIPage, presetsOrder, 92)
+
+	local nameStroke = Stroke(Theme.Stroke, 1)
+	local nameBox = New("TextBox", {
+		Parent = presetsCard,
+		Position = UDim2.fromOffset(14, 12),
+		Size = UDim2.new(1, -104, 0, 28),
+		BackgroundColor3 = Theme.Background,
+		BorderSizePixel = 0,
+		Text = "",
+		PlaceholderText = "Preset name...",
+		PlaceholderColor3 = Theme.Muted,
+		TextColor3 = Theme.Text,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 12,
+		ClearTextOnFocus = false
+	}, { Corner(6), nameStroke, New("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }) })
+
+	nameBox.Focused:Connect(function() Tween(nameStroke, { Color = Theme.White }, 0.12) end)
+	nameBox.FocusLost:Connect(function() Tween(nameStroke, { Color = Theme.Stroke }, 0.12) end)
+
+	local saveBtn = New("TextButton", {
+		Parent = presetsCard,
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, -14, 0, 12),
+		Size = UDim2.fromOffset(70, 28),
+		BackgroundColor3 = Theme.White,
+		Text = "SAVE",
+		TextColor3 = Theme.Black,
+		Font = Enum.Font.GothamBold,
+		TextSize = 11,
+		AutoButtonColor = false,
+		BorderSizePixel = 0
+	}, { Corner(6) })
+
+	local listHolder = New("Frame", {
+		Parent = presetsCard,
+		Position = UDim2.fromOffset(14, 48),
+		Size = UDim2.new(1, -28, 0, 32),
+		BackgroundTransparency = 1
+	})
+
+	local function RebuildPresetList()
+		listHolder:ClearAllChildren()
+		local names = {}
+		for presetName in pairs(PresetStore.Presets) do
+			table.insert(names, presetName)
+		end
+		table.sort(names)
+
+		if #names == 0 then
+			New("TextLabel", {
+				Parent = listHolder,
+				Size = UDim2.new(1, 0, 0, 26),
+				BackgroundTransparency = 1,
+				Text = "No saved presets",
+				TextColor3 = Theme.SubText,
+				Font = Enum.Font.GothamMedium,
+				TextSize = 11,
+				TextXAlignment = Enum.TextXAlignment.Left
+			})
+			presetsCard.Size = UDim2.new(1, 0, 0, 84)
+			return
+		end
+
+		local y = 0
+		for _, presetName in ipairs(names) do
+			local isActive = (PresetStore.ActivePreset == presetName)
+			local row = New("Frame", {
+				Parent = listHolder,
+				Position = UDim2.fromOffset(0, y),
+				Size = UDim2.new(1, 0, 0, 28),
+				BackgroundColor3 = Theme.Background,
+				BorderSizePixel = 0
+			}, { Corner(6), Stroke(isActive and Theme.White or Theme.Stroke, 1) })
+
+			New("TextLabel", {
+				Parent = row,
+				Position = UDim2.fromOffset(10, 0),
+				Size = UDim2.new(1, -118, 1, 0),
+				BackgroundTransparency = 1,
+				Text = presetName,
+				TextColor3 = isActive and Theme.White or Theme.Text,
+				Font = Enum.Font.GothamMedium,
+				TextSize = 12,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				TextTruncate = Enum.TextTruncate.AtEnd
+			})
+
+			local loadBtn = New("TextButton", {
+				Parent = row,
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.new(1, -56, 0.5, 0),
+				Size = UDim2.fromOffset(48, 20),
+				BackgroundColor3 = Theme.Card,
+				Text = "LOAD",
+				TextColor3 = Theme.Text,
+				Font = Enum.Font.GothamBold,
+				TextSize = 9,
+				AutoButtonColor = false,
+				BorderSizePixel = 0
+			}, { Corner(4), Stroke(Theme.Stroke, 1) })
+
+			local delBtn = New("TextButton", {
+				Parent = row,
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.new(1, -6, 0.5, 0),
+				Size = UDim2.fromOffset(44, 20),
+				BackgroundColor3 = Theme.Card,
+				Text = "DEL",
+				TextColor3 = Theme.SubText,
+				Font = Enum.Font.GothamBold,
+				TextSize = 9,
+				AutoButtonColor = false,
+				BorderSizePixel = 0
+			}, { Corner(4), Stroke(Theme.Stroke, 1) })
+
+			loadBtn.MouseButton1Click:Connect(function()
+				local presetData = PresetStore.Presets[presetName]
+				if presetData then
+					PresetStore.ActivePreset = presetName
+					SavePresetsToDisk()
+					ApplyPresetData(presetData)
+					RebuildPresetList()
+				end
+			end)
+
+			delBtn.MouseButton1Click:Connect(function()
+				PresetStore.Presets[presetName] = nil
+				if PresetStore.ActivePreset == presetName then
+					PresetStore.ActivePreset = nil
+				end
+				SavePresetsToDisk()
+				RebuildPresetList()
+			end)
+
+			y += 34
+		end
+
+		listHolder.Size = UDim2.new(1, -28, 0, y)
+		presetsCard.Size = UDim2.new(1, 0, 0, 54 + y)
+	end
+
+	saveBtn.MouseButton1Click:Connect(function()
+		local rawName = string.gsub(nameBox.Text, "^%s*(.-)%s*$", "%1")
+		if #rawName == 0 then
+			rawName = PresetStore.ActivePreset or ("Preset " .. tostring(#PresetStore.Presets + 1))
+		end
+		PresetStore.Presets[rawName] = CaptureCurrentPreset()
+		PresetStore.ActivePreset = rawName
+		nameBox.Text = ""
+		SavePresetsToDisk()
+		RebuildPresetList()
+	end)
+
+	RebuildPresetList()
+end
+
+if PresetStore.AutoLoad and PresetStore.ActivePreset and PresetStore.Presets[PresetStore.ActivePreset] then
+	ApplyPresetData(PresetStore.Presets[PresetStore.ActivePreset])
+end
+
 BuildCrosshair()
 BuildCustomCursor()
 UpdateCursorDisplay()
 
--- По умолчанию все разделы свёрнуты.
 for _, section in ipairs(Sections) do
 	section.Collapse()
 end
@@ -2616,7 +3293,8 @@ RunService:BindToRenderStep("StretchResolution", Enum.RenderPriority.Camera.Valu
 end)
 
 local function UpdateKillerLights()
-	if not KillerLightConfig.Enabled then
+	-- Killer Light не отображается, если локальный игрок в команде Killer
+	if not KillerLightConfig.Enabled or IsLocalPlayerKiller() then
 		if next(ActiveKillerLights) then
 			ClearKillerLights()
 		end
@@ -2625,7 +3303,7 @@ local function UpdateKillerLights()
 
 	local activeUserIds = {}
 	for _, player in ipairs(Players:GetPlayers()) do
-		if player.Team and player.Team.Name == "Killer" then
+		if player ~= LocalPlayer and player.Team and player.Team.Name == "Killer" then
 			local character = player.Character
 			local torso = character and (
 				character:FindFirstChild("UpperTorso")
@@ -2664,9 +3342,6 @@ end
 
 RunService.RenderStepped:Connect(function()
 	if isOpen then
-		-- Пока меню открыто, временно освобождаем мышь от LockCenter,
-		-- чтобы настоящий указатель мог двигаться и GUI получал клики.
-		-- При закрытии меню исходный MouseBehavior будет восстановлен.
 		if UserInputService.MouseBehavior ~= Enum.MouseBehavior.Default then
 			UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 		end
@@ -2684,7 +3359,8 @@ RunService.RenderStepped:Connect(function()
 
 	UpdateKillerLights()
 
-	if not KillerBeamConfig.Enabled then
+	-- Killer Beam не отображается, если локальный игрок в команде Killer
+	if not KillerBeamConfig.Enabled or IsLocalPlayerKiller() then
 		if next(ActiveBeams) then ClearBeams() end
 		return
 	end
@@ -2756,12 +3432,15 @@ for _, player in ipairs(Players:GetPlayers()) do
 end
 Players.PlayerAdded:Connect(SetupPlayer)
 
-LocalPlayer:GetPropertyChangedSignal("Team"):Connect(UpdateCursorDisplay)
--- При смене команды включаем/выключаем ESP окон, паллет и генераторов.
-LocalPlayer:GetPropertyChangedSignal("Team"):Connect(RefreshObjectHighlights)
 LocalPlayer:GetPropertyChangedSignal("Team"):Connect(function()
+	UpdateCursorDisplay()
+	UpdateAllPlayers()
+	RefreshObjectHighlights()
+	if IsLocalPlayerKiller() then
+		ClearKillerLights()
+		ClearBeams()
+	end
 	pcall(ReapplyWorldEffects)
-	-- игра может менять освещение с задержкой после смены команды
 	task.delay(0.5, function() pcall(ReapplyWorldEffects) end)
 end)
 UpdateCursorDisplay()
@@ -2772,7 +3451,6 @@ local function SetOpen(open)
 	if isOpen == open then return end
 	isOpen = open
 	if open then
-		-- Сохраняем режим игры и отпускаем курсор для управления меню.
 		mouseBehaviorBeforeMenu = UserInputService.MouseBehavior
 		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 		virtualCursorPosition = UserInputService:GetMouseLocation()
@@ -2789,7 +3467,6 @@ local function SetOpen(open)
 			if not isOpen then MainFrame.Visible = false end
 		end)
 
-		-- Возвращаем игре тот режим мыши, который был до открытия меню.
 		if mouseBehaviorBeforeMenu then
 			UserInputService.MouseBehavior = mouseBehaviorBeforeMenu
 			mouseBehaviorBeforeMenu = nil
