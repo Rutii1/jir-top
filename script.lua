@@ -20,8 +20,7 @@ local KillerBeamConfig = { Enabled = false, Color = Color3.fromRGB(80, 80, 80), 
 
 local ObjectESPConfig = {
     Generator = { Enabled = false, Color = Color3.fromRGB(255, 190, 70) },
-    Pallet = { Enabled = false, Color = Color3.fromRGB(80, 190, 255) },
-    Window = { Enabled = false, Color = Color3.fromRGB(150, 255, 150) }
+    Pallet = { Enabled = false, Color = Color3.fromRGB(80, 190, 255) }
 }
 
 local VisualsConfig = {
@@ -225,10 +224,11 @@ local function WatchBlurContainer(container)
 	ScanBlurIn(container)
 end
 
-WatchBlurContainer(Lighting)
-WatchBlurContainer(Workspace.CurrentCamera)
+-- pcall: ошибка в этих дополнительных функциях не должна ломать запуск меню.
+pcall(WatchBlurContainer, Lighting)
+pcall(WatchBlurContainer, Workspace.CurrentCamera)
 Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-	WatchBlurContainer(Workspace.CurrentCamera)
+	pcall(WatchBlurContainer, Workspace.CurrentCamera)
 end)
 
 local function ApplyNoBlur(on)
@@ -1595,22 +1595,12 @@ end
 
 -- Object ESP: Generator и Pallet ищутся по имени (Model/BasePart, в имени
 -- которых есть generator или pallet, без учёта регистра).
--- Window ESP подсвечивает ТОЛЬКО объекты с тегом vaultbox (CollectionService),
--- по имени окна больше не ищутся.
--- Работает только если локальный игрок в команде Survivors или Killer.
---
--- Как это устроено:
---  * подходящие объекты кэшируются (нет сканов всего Workspace);
---  * подсвечивается только самый верхний подходящий объект (без дублей на
---    вложенных частях), иначе Roblox упирается в лимит ~31 Highlight и
---    часть подсветки перестаёт рисоваться;
---  * лимит учитывается: генераторы в приоритете, остальное - ближайшее;
---  * watchdog раз в ~0.4 c чинит подсветку, если игра изменила объект:
---    переименовала, пересоздала Highlight, сменила Adornee и т.п.
-local MAX_HIGHLIGHTS = 31
+-- ESP окон полностью удалён.
+local MAX_HIGHLIGHTS = 255 -- лимит Roblox на одновременно отображаемые Highlight
+local OBJECT_ESP_MAX_DISTANCE = 400 -- studs от камеры
 
 local ActiveObjectHighlights = {}
-local ObjectCandidates = {} -- instance -> "Generator" | "Pallet" | "Window"
+local ObjectCandidates = {} -- instance -> "Generator" | "Pallet"
 local ObjectNames = {}      -- instance -> последнее известное имя
 
 local ObjectKeywords = {
@@ -1618,12 +1608,7 @@ local ObjectKeywords = {
 	{ Key = "Pallet", Lower = "pallet" }
 }
 
--- Теги окон (CollectionService чувствителен к регистру, поэтому несколько вариантов)
-local CollectionService = game:GetService("CollectionService")
-local WINDOW_TAGS = { "vaultbox", "VaultBox", "Vaultbox", "vaultBox", "VAULTBOX" }
-local ObjectTagged = setmetatable({}, { __mode = "k" }) -- instance -> true (есть тег vaultbox)
-
-local ObjectPriority = { Generator = 1, Window = 2, Pallet = 3 }
+local ObjectPriority = { Generator = 1, Pallet = 2 }
 
 local function IsObjectESPAllowed()
 	local team = LocalPlayer.Team
@@ -1646,9 +1631,6 @@ end
 
 local function RegisterObject(instance)
 	local keyword = ClassifyObject(instance)
-	if not keyword and ObjectTagged[instance] then
-		keyword = "Window"
-	end
 	if keyword then
 		ObjectCandidates[instance] = keyword
 		ObjectNames[instance] = instance.Name
@@ -1667,12 +1649,21 @@ local function RemoveObjectHighlight(instance)
 	end
 end
 
--- true, если выше по иерархии уже есть подходящий объект той же категории
-local function IsNestedInSameKind(instance, keyword)
+-- Не подсвечиваем вложенный объект, если его родитель уже подсвечивается.
+-- Проверка общая для всех категорий, чтобы разные типы ESP не накладывались.
+local function HasHighlightedClassifiedAncestor(instance, cameraPosition)
 	local parent = instance.Parent
 	while parent and parent ~= Workspace do
-		if ObjectCandidates[parent] == keyword then
-			return true
+		local parentKeyword = ObjectCandidates[parent]
+		local parentConfig = parentKeyword and ObjectESPConfig[parentKeyword]
+		if parentConfig and parentConfig.Enabled then
+			local ok, position = pcall(function()
+				if parent:IsA("Model") then return parent:GetPivot().Position end
+				if parent:IsA("BasePart") then return parent.Position end
+			end)
+			if ok and position and (position - cameraPosition).Magnitude <= OBJECT_ESP_MAX_DISTANCE then
+				return true
+			end
 		end
 		parent = parent.Parent
 	end
@@ -1733,50 +1724,61 @@ local function RefreshObjectHighlights()
 		return
 	end
 
+	local camera = Workspace.CurrentCamera
+	if not camera then
+		for instance in pairs(ActiveObjectHighlights) do
+			RemoveObjectHighlight(instance)
+		end
+		return
+	end
+	local camPos = camera.CFrame.Position
 	local wanted = {}
+
 	for instance, keyword in pairs(ObjectCandidates) do
 		if not instance:IsDescendantOf(Workspace) then
 			ObjectCandidates[instance] = nil
 			ObjectNames[instance] = nil
 		else
-			-- объект переименовали - перепроверяем категорию
+			-- Если объект переименовали, перепроверяем его категорию.
 			if instance.Name ~= ObjectNames[instance] then
 				keyword = RegisterObject(instance)
 			end
 			if keyword then
 				local config = ObjectESPConfig[keyword]
-				if config and config.Enabled and not IsNestedInSameKind(instance, keyword) then
-					wanted[#wanted + 1] = {
-						Instance = instance,
-						Config = config,
-						Priority = ObjectPriority[keyword] or 9
-					}
+				if config and config.Enabled and not HasHighlightedClassifiedAncestor(instance, camPos) then
+					local ok, position = pcall(ObjectPosition, instance)
+					if ok and position then
+						local distance = (position - camPos).Magnitude
+						if distance <= OBJECT_ESP_MAX_DISTANCE then
+							wanted[#wanted + 1] = {
+								Instance = instance,
+								Config = config,
+								Distance = distance,
+								Priority = ObjectPriority[keyword] or 9
+							}
+						end
+					end
 				end
 			end
 		end
 	end
 
-	local budget = math.max(0, MAX_HIGHLIGHTS - CountPlayerHighlights())
-	if #wanted > budget then
-		local camera = Workspace.CurrentCamera
-		local camPos = camera and camera.CFrame.Position or Vector3.zero
-		for _, entry in ipairs(wanted) do
-			entry.Dist = (ObjectPosition(entry.Instance) - camPos).Magnitude
-		end
-		table.sort(wanted, function(x, y)
-			if x.Priority ~= y.Priority then
-				return x.Priority < y.Priority
+	-- Сначала ближайшие; при одинаковой дистанции используется приоритет категории.
+	table.sort(wanted, function(a, b)
+			if math.abs(a.Distance - b.Distance) > 0.01 then
+				return a.Distance < b.Distance
 			end
-			return x.Dist < y.Dist
-		end)
-	end
+			return a.Priority < b.Priority
+	end)
 
+	-- Учитываем Highlight игроков и лимит Roblox в 255 объектов.
+	local budget = math.max(0, MAX_HIGHLIGHTS - CountPlayerHighlights())
 	local keep = {}
 	for i = 1, math.min(#wanted, budget) do
 		keep[wanted[i].Instance] = wanted[i].Config
 	end
 
-	-- сначала убираем лишнее, потом создаём/чиним нужное
+	-- Сначала удаляем лишнее, затем создаём/обновляем выбранные подсветки.
 	for instance in pairs(ActiveObjectHighlights) do
 		if not keep[instance] then
 			RemoveObjectHighlight(instance)
@@ -1809,35 +1811,6 @@ Workspace.DescendantRemoving:Connect(function(instance)
 	end
 end)
 
--- Window ESP: объекты с тегом vaultbox (без сканирования Workspace).
-local function RegisterTagged(instance)
-	if not (instance:IsA("Model") or instance:IsA("BasePart")) then return end
-	ObjectTagged[instance] = true
-	ObjectCandidates[instance] = "Window"
-	ObjectNames[instance] = instance.Name
-end
-
-local function UnregisterTagged(instance)
-	for _, tag in ipairs(WINDOW_TAGS) do
-		if CollectionService:HasTag(instance, tag) then
-			return -- ещё остался другой вариант тега
-		end
-	end
-	ObjectTagged[instance] = nil
-	RegisterObject(instance) -- вернёт категорию по имени или очистит запись
-	if not ObjectCandidates[instance] then
-		RemoveObjectHighlight(instance)
-	end
-end
-
-for _, tag in ipairs(WINDOW_TAGS) do
-	for _, instance in ipairs(CollectionService:GetTagged(tag)) do
-		RegisterTagged(instance)
-	end
-	CollectionService:GetInstanceAddedSignal(tag):Connect(RegisterTagged)
-	CollectionService:GetInstanceRemovedSignal(tag):Connect(UnregisterTagged)
-end
-
 -- Единственный начальный скан Workspace (по частям, чтобы не было фриза).
 task.spawn(function()
 	local descendants = Workspace:GetDescendants()
@@ -1853,7 +1826,7 @@ end)
 -- Watchdog: чинит подсветку, если игра что-то изменила у объекта.
 task.spawn(function()
 	while true do
-		task.wait(0.4)
+		task.wait(0.25)
 		pcall(RefreshObjectHighlights)
 	end
 end)
@@ -2110,7 +2083,6 @@ end
 CreateSectionLabel(EspPage, NextEspOrder(), "Objects")
 CreateObjectESPCard("Generator", ObjectESPConfig.Generator)
 CreateObjectESPCard("Pallet", ObjectESPConfig.Pallet)
-CreateObjectESPCard("Window", ObjectESPConfig.Window, "Window (vaultbox)")
 
 CreateSectionLabel(EspPage, NextEspOrder(), "Beam")
 CreateBeamCard()
@@ -2788,9 +2760,9 @@ LocalPlayer:GetPropertyChangedSignal("Team"):Connect(UpdateCursorDisplay)
 -- При смене команды включаем/выключаем ESP окон, паллет и генераторов.
 LocalPlayer:GetPropertyChangedSignal("Team"):Connect(RefreshObjectHighlights)
 LocalPlayer:GetPropertyChangedSignal("Team"):Connect(function()
-	ReapplyWorldEffects()
+	pcall(ReapplyWorldEffects)
 	-- игра может менять освещение с задержкой после смены команды
-	task.delay(0.5, ReapplyWorldEffects)
+	task.delay(0.5, function() pcall(ReapplyWorldEffects) end)
 end)
 UpdateCursorDisplay()
 
